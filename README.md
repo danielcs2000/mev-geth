@@ -1,8 +1,8 @@
 ## Simulate full bundles
-This is a fork of the release 1.13 of go-ethereum based on old Flashbots mev-geth repository adapted by
+This is a fork of the release 1.14 of go-ethereum based on old Flashbots mev-geth repository adapted by
 [Nali Project team](https://nali.finance).
 
-Enable searchers to simulate full bundles and estimate the gas usage of a bundle with version v1.13 of geth.
+Enable searchers to simulate full bundles and estimate the gas usage of a bundle with version v1.14 of geth.
 
 ---
 
