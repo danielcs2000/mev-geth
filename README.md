@@ -10,6 +10,7 @@ Enable searchers to simulate full bundles and estimate the gas usage of a bundle
 - Clone the repository and build following the official go-ethereum docs
 ---
 
+
 ## Quick instructions
 - Clone repo, enter the directory and then:
 ```shell
@@ -25,3 +26,11 @@ make geth
 [Official go-ethereum repository](https://github.com/ethereum/go-ethereum/)
 
 [Official 'Fleshbots' mev-geth repository](https://github.com/flashbots/mev-geth)
+
+---
+
+If you like this fork, consider donating a beer:
+```shell
+0x3C971db5E7c0DDC73C1a3B4c6eD13279b4dedA4E
+```
+
