@@ -1499,6 +1499,7 @@ func (s *BlockChainAPI) CreateAccessList(ctx context.Context, args TransactionAr
 // AccessList creates an access list for the given transaction.
 // If the accesslist creation fails an error is returned.
 // If the transaction itself fails, an vmErr is returned.
+// Usaremos esta funcion
 func AccessList(ctx context.Context, b Backend, blockNrOrHash rpc.BlockNumberOrHash, args TransactionArgs) (acl types.AccessList, gasUsed uint64, vmErr error, err error) {
 	// Retrieve the execution context
 	db, header, err := b.StateAndHeaderByNumberOrHash(ctx, blockNrOrHash)
@@ -1506,6 +1507,55 @@ func AccessList(ctx context.Context, b Backend, blockNrOrHash rpc.BlockNumberOrH
 		return nil, 0, nil, err
 	}
 
+	// Ensure any missing fields are filled, extract the recipient and input data
+	if err := args.setDefaults(ctx, b, true); err != nil {
+		return nil, 0, nil, err
+	}
+	var to common.Address
+	if args.To != nil {
+		to = *args.To
+	} else {
+		to = crypto.CreateAddress(args.from(), uint64(*args.Nonce))
+	}
+	isPostMerge := header.Difficulty.Sign() == 0
+	// Retrieve the precompiles since they don't need to be added to the access list
+	precompiles := vm.ActivePrecompiles(b.ChainConfig().Rules(header.Number, isPostMerge, header.Time))
+
+	// Create an initial tracer
+	prevTracer := logger.NewAccessListTracer(nil, args.from(), to, precompiles)
+	if args.AccessList != nil {
+		prevTracer = logger.NewAccessListTracer(*args.AccessList, args.from(), to, precompiles)
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, nil, err
+		}
+		// Retrieve the current access list to expand
+		accessList := prevTracer.AccessList()
+		log.Trace("Creating access list", "input", accessList)
+
+		// Copy the original db so we don't modify it
+		statedb := db.Copy()
+		// Set the accesslist to the last al
+		args.AccessList = &accessList
+		msg := args.ToMessage(header.BaseFee)
+
+		// Apply the transaction with the access list tracer
+		tracer := logger.NewAccessListTracer(accessList, args.from(), to, precompiles)
+		config := vm.Config{Tracer: tracer.Hooks(), NoBaseFee: true}
+		vmenv := b.GetEVM(ctx, msg, statedb, header, &config, nil)
+		res, err := core.ApplyMessage(vmenv, msg, new(core.GasPool).AddGas(msg.GasLimit))
+		if err != nil {
+			return nil, 0, nil, fmt.Errorf("failed to apply transaction: %v err: %v", args.ToTransaction().Hash(), err)
+		}
+		if tracer.Equal(prevTracer) {
+			return accessList, res.UsedGas, res.Err, nil
+		}
+		prevTracer = tracer
+	}
+}
+
+func AccessListWithContext(ctx context.Context, b Backend, db *state.StateDB, header *types.Header, args TransactionArgs) (acl types.AccessList, gasUsed uint64, vmErr error, err error) {
 	// Ensure any missing fields are filled, extract the recipient and input data
 	if err := args.setDefaults(ctx, b, true); err != nil {
 		return nil, 0, nil, err
@@ -2210,6 +2260,7 @@ type CallBundleArgs struct {
 // The sender is responsible for signing the transactions and using the correct
 // nonce and ensuring validity
 func (s *BundleAPI) CallBundle(ctx context.Context, args CallBundleArgs) (map[string]interface{}, error) {
+	// TODO: here
 	if len(args.Txs) == 0 {
 		return nil, errors.New("bundle missing txs")
 	}
@@ -2294,32 +2345,52 @@ func (s *BundleAPI) CallBundle(ctx context.Context, args CallBundleArgs) (map[st
 
 	bundleHash := sha3.NewLegacyKeccak256()
 
-    isPostMerge := header.Difficulty.Cmp(common.Big0) == 0
-    rules := s.b.ChainConfig().Rules(blockNumber, isPostMerge, header.Time)
+	isPostMerge := header.Difficulty.Cmp(common.Big0) == 0
+	rules := s.b.ChainConfig().Rules(blockNumber, isPostMerge, header.Time)
 
 	signer := types.MakeSigner(s.b.ChainConfig(), blockNumber, header.Time)
 	var totalGasUsed uint64
 	gasFees := new(big.Int)
 	for _, tx := range txs {
 		// Convert tx to msg to apply state transition
-        msg, err := core.TransactionToMessage(tx, signer, header.BaseFee)
-        if err != nil {
-            return nil, err
-        }
+		msg, err := core.TransactionToMessage(tx, signer, header.BaseFee)
+		if err != nil {
+			return nil, err
+		}
+		txGas := hexutil.Uint64(tx.Gas())
+		txValue := hexutil.Big(*tx.Value())
+		txNonce := hexutil.Uint64(tx.Nonce())
+		txData := hexutil.Bytes(tx.Data())
+		from, err := types.Sender(signer, tx)
+		if err != nil {
+			return nil, fmt.Errorf("err: %w; txhash %s", err, tx.Hash())
+		}
+
+		txArgs := TransactionArgs{
+			To:                   tx.To(),
+			Gas:                  &txGas,
+			Value:                &txValue,
+			Nonce:                &txNonce,
+			Data:                 &txData,
+			GasPrice:             (*hexutil.Big)(tx.GasPrice()),
+			MaxFeePerGas:         (*hexutil.Big)(tx.GasFeeCap()),
+			MaxPriorityFeePerGas: (*hexutil.Big)(tx.GasTipCap()),
+			From:                 &from,
+		}
+
+		acl, _, _, _ := AccessListWithContext(ctx, s.b, state, header, txArgs)
 
 		coinbaseBalanceBeforeTx := state.GetBalance(coinbase)
 		state.Prepare(rules, msg.From, coinbase, msg.To, vm.ActivePrecompiles(rules), msg.AccessList)
 
+		// Aqui aplica la txs al state del bloque
 		receipt, result, err := core.ApplyTransactionWithResult(s.b.ChainConfig(), s.chain, &coinbase, gp, state, header, tx, &header.GasUsed, vmconfig)
 		if err != nil {
 			return nil, fmt.Errorf("err: %w; txhash %s", err, tx.Hash())
 		}
 
 		txHash := tx.Hash().String()
-		from, err := types.Sender(signer, tx)
-		if err != nil {
-			return nil, fmt.Errorf("err: %w; txhash %s", err, tx.Hash())
-		}
+
 		to := "0x"
 		if tx.To() != nil {
 			to = tx.To().String()
@@ -2329,6 +2400,7 @@ func (s *BundleAPI) CallBundle(ctx context.Context, args CallBundleArgs) (map[st
 			"gasUsed":     receipt.GasUsed,
 			"fromAddress": from.String(),
 			"toAddress":   to,
+			"accessList":  acl,
 		}
 		totalGasUsed += receipt.GasUsed
 		gasPrice, err := tx.EffectiveGasTip(header.BaseFee)
@@ -2447,7 +2519,7 @@ func (s *BundleAPI) EstimateGasBundle(ctx context.Context, args EstimateGasBundl
 	blockContext := core.NewEVMBlockContext(header, s.chain, &coinbase)
 
 	isPostMerge := header.Difficulty.Cmp(common.Big0) == 0
-    rules := s.b.ChainConfig().Rules(blockNumber, isPostMerge, header.Time)
+	rules := s.b.ChainConfig().Rules(blockNumber, isPostMerge, header.Time)
 
 	// Feed each of the transactions into the VM ctx
 	// And try and estimate the gas used
@@ -2462,7 +2534,6 @@ func (s *BundleAPI) EstimateGasBundle(ctx context.Context, args EstimateGasBundl
 
 		// New random hash since its a call
 		statedb.Prepare(rules, msg.From, coinbase, msg.To, vm.ActivePrecompiles(rules), msg.AccessList)
-
 
 		// Prepare the hashes
 		txContext := core.NewEVMTxContext(msg)
