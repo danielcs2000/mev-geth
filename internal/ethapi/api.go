@@ -2367,21 +2367,35 @@ func (s *BundleAPI) CallBundle(ctx context.Context, args CallBundleArgs) (map[st
 		}
 
 		txArgs := TransactionArgs{
-			To:                   tx.To(),
-			Gas:                  &txGas,
-			Value:                &txValue,
-			Nonce:                &txNonce,
-			Data:                 &txData,
-			GasPrice:             (*hexutil.Big)(tx.GasPrice()),
-			MaxFeePerGas:         (*hexutil.Big)(tx.GasFeeCap()),
-			MaxPriorityFeePerGas: (*hexutil.Big)(tx.GasTipCap()),
-			From:                 &from,
+			To:    tx.To(),
+			Gas:   &txGas,
+			Value: &txValue,
+			Nonce: &txNonce,
+			Data:  &txData,
+			From:  &from,
 		}
 
-		acl, _, _, _ := AccessListWithContext(ctx, s.b, state, header, txArgs)
+		switch tx.Type() {
+		case types.LegacyTxType, types.AccessListTxType:
+			txArgs.GasPrice = (*hexutil.Big)(tx.GasPrice())
+		case types.DynamicFeeTxType, types.BlobTxType:
+			txArgs.MaxFeePerGas = (*hexutil.Big)(tx.GasFeeCap())
+			txArgs.MaxPriorityFeePerGas = (*hexutil.Big)(tx.GasTipCap())
+		default:
+			return nil, fmt.Errorf("unsupported tx type %d", tx.Type())
+		}
 
 		coinbaseBalanceBeforeTx := state.GetBalance(coinbase)
 		state.Prepare(rules, msg.From, coinbase, msg.To, vm.ActivePrecompiles(rules), msg.AccessList)
+
+		acl, gasUsed, vmerr, err := AccessListWithContext(ctx, s.b, state, header, txArgs)
+		if err != nil {
+			return nil, fmt.Errorf("err: %w; txhash %s", err, tx.Hash())
+		}
+		accessListResult := &accessListResult{Accesslist: &acl, GasUsed: hexutil.Uint64(gasUsed)}
+		if vmerr != nil {
+			accessListResult.Error = vmerr.Error()
+		}
 
 		// Aqui aplica la txs al state del bloque
 		receipt, result, err := core.ApplyTransactionWithResult(s.b.ChainConfig(), s.chain, &coinbase, gp, state, header, tx, &header.GasUsed, vmconfig)
@@ -2396,11 +2410,11 @@ func (s *BundleAPI) CallBundle(ctx context.Context, args CallBundleArgs) (map[st
 			to = tx.To().String()
 		}
 		jsonResult := map[string]interface{}{
-			"txHash":      txHash,
-			"gasUsed":     receipt.GasUsed,
-			"fromAddress": from.String(),
-			"toAddress":   to,
-			"accessList":  acl,
+			"txHash":           txHash,
+			"gasUsed":          receipt.GasUsed,
+			"fromAddress":      from.String(),
+			"toAddress":        to,
+			"accessListResult": accessListResult,
 		}
 		totalGasUsed += receipt.GasUsed
 		gasPrice, err := tx.EffectiveGasTip(header.BaseFee)
